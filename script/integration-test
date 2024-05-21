@@ -1,0 +1,67 @@
+#!/bin/bash
+
+set -euxo pipefail
+
+function cleanup() {
+	kind delete cluster
+}
+trap cleanup EXIT
+
+cat <<EOF | kind create cluster --config -
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+- role: worker
+  kubeadmConfigPatches:
+  - |
+    kind: JoinConfiguration
+    nodeRegistration:
+      taints:
+      - key: "node.vanstee.github.io/daemonset-not-ready"
+        value: "kube-system.test-1"
+        effect: "NoSchedule"
+EOF
+
+docker build -t node-taint-manager .
+kind load docker-image node-taint-manager
+kubectl apply -f manifest.yml
+kubectl -n node-taint-manager rollout status deploy/node-taint-manager
+
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: test-1
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: test-1
+  template:
+    metadata:
+      labels:
+        name: test-1
+    spec:
+      containers:
+      - name: test-1
+        image: alpine
+        command: ["/bin/sleep", "infinity"]
+        readinessProbe:
+          exec:
+            command:
+            - "/bin/true"
+      tolerations:
+      - key: "node.vanstee.github.io/daemonset-not-ready"
+        operator: "Exists"
+EOF
+
+timeout 30s bash <<EOF
+while ! kubectl get node kind-worker -o json | jq -e '.spec.taints == null'; do
+	sleep 1
+done
+
+echo "!!!"
+echo "!!! SUCCESS: taint was removed for ready daemonset pod"
+echo "!!!"
+EOF
