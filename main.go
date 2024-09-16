@@ -5,12 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"sort"
 	"time"
 
+	"github.com/avast/retry-go"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -32,6 +37,23 @@ const (
 	TaintNodeDaemonSetNotReady = "node.vanstee.github.io/daemonset-not-ready"
 
 	JSONPatchOperationOpRemove = "remove"
+)
+
+var (
+	totalNodeCount = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "node_taint_manager_nodes_monitored",
+		Help: "The total number of nodes node-taint-manager is tracking.",
+	})
+
+	nodesUntainted = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "node_taint_manager_nodes_untainted",
+		Help: "The number of nodes node-taint-manager has determined ready and removed taint from.",
+	})
+	timeToStartup = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "node_taint_manager_time_to_ready",
+		Help:    "Time in seconds taken for the all the daemonsets on the nodes to be ready",
+		Buckets: []float64{0.1, 1, 2, 3, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 70, 80, 90, 100, 110, 120},
+	}, []string{})
 )
 
 type JSONPatchOperation struct {
@@ -70,7 +92,8 @@ func main() {
 			case *apiv1.Node:
 				return &apiv1.Node{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: t.ObjectMeta.Name,
+						Name:              t.ObjectMeta.Name,
+						CreationTimestamp: t.ObjectMeta.CreationTimestamp,
 					},
 					Spec: apiv1.NodeSpec{
 						Taints: t.Spec.Taints,
@@ -121,12 +144,23 @@ func main() {
 	ticker := time.NewTicker(reconciliationInterval)
 	log.Printf("reconciling node taints with daemonset pods every %d", reconciliationInterval)
 
+	prometheus.Register(timeToStartup)
+	http.Handle("/metrics", promhttp.Handler())
+	go func() {
+		log.Println("serving metrics on :9090/metrics")
+		if err := http.ListenAndServe(":9090", nil); err != http.ErrServerClosed {
+			log.Fatalf("metrics server failed %v", err)
+		}
+	}()
+
 	// TODO: consider selecting a channel of events from informer, or use more
 	// custom watch implementation to speed things up (and save memory)
 	for {
 		select {
 		case <-ticker.C:
-			for _, inode := range nodesInformer.GetIndexer().List() {
+			nodes := nodesInformer.GetIndexer().List()
+			totalNodeCount.Set(float64(len(nodes)))
+			for _, inode := range nodes {
 				node, ok := inode.(*apiv1.Node)
 				if !ok {
 					continue
@@ -178,6 +212,9 @@ func main() {
 					continue
 				}
 
+				// calculate the time here so potential slow node patching time doesn't get reflected in metrics
+				nodeTimeToReady := time.Since(time.Time(node.ObjectMeta.CreationTimestamp.Time)).Seconds()
+
 				// use reverse order to avoid indexing problems with multiple jsonpatch
 				// remove operations
 				sort.Sort(sort.Reverse(sort.IntSlice(taintsToRemove)))
@@ -196,10 +233,20 @@ func main() {
 					continue
 				}
 
-				// TODO: retry on conflict
-				if _, err = client.CoreV1().Nodes().Patch(ctx, node.ObjectMeta.Name, types.JSONPatchType, bytes, metav1.PatchOptions{}); err != nil {
+				err = retry.Do(
+					func() error {
+						_, err := client.CoreV1().Nodes().Patch(ctx, node.ObjectMeta.Name, types.JSONPatchType, bytes, metav1.PatchOptions{})
+						return err
+					},
+					retry.Attempts(3),
+				)
+
+				if err != nil {
 					continue
 				}
+
+				timeToStartup.WithLabelValues().Observe(nodeTimeToReady)
+				nodesUntainted.Inc()
 			}
 		case <-ctx.Done():
 			break
