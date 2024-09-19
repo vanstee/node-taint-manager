@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"time"
 
 	"github.com/avast/retry-go"
@@ -107,7 +106,8 @@ func main() {
 						OwnerReferences: t.ObjectMeta.OwnerReferences,
 					},
 					Spec: apiv1.PodSpec{
-						NodeName: t.Spec.NodeName,
+						NodeName:    t.Spec.NodeName,
+						Tolerations: t.Spec.Tolerations,
 					},
 					Status: apiv1.PodStatus{
 						Conditions: t.Status.Conditions,
@@ -166,14 +166,14 @@ func main() {
 					continue
 				}
 
-				hasMatchingTaints := false
-				for _, taint := range node.Spec.Taints {
+				taintIndex := -1
+				for i, taint := range node.Spec.Taints {
 					if taint.Key == TaintNodeDaemonSetNotReady {
-						hasMatchingTaints = true
+						taintIndex = i
 						break
 					}
 				}
-				if !hasMatchingTaints {
+				if taintIndex == -1 {
 					continue
 				}
 
@@ -182,50 +182,45 @@ func main() {
 					continue
 				}
 
-				taintsToRemove := []int{}
+				// only proceed if all the tolerated daemonset pods on the node are ready
+				allPodsReady := false
 				for _, ipod := range pods {
 					pod, ok := ipod.(*apiv1.Pod)
 					if !ok {
-						continue
-					}
-					if !apiv1pod.IsPodReady(pod) {
 						continue
 					}
 					controller := metav1.GetControllerOfNoCopy(pod)
 					if controller == nil || controller.Kind != "DaemonSet" {
 						continue
 					}
-
-					// TODO: build map of taints with original index to avoid inner loop
-					value := pod.ObjectMeta.Namespace + "." + controller.Name
-					for i, taint := range node.Spec.Taints {
-						if taint.Key != TaintNodeDaemonSetNotReady || taint.Value != value {
-							continue
+					toleratedPod := false
+					for _, toleration := range pod.Spec.Tolerations {
+						if toleration.Key == TaintNodeDaemonSetNotReady {
+							toleratedPod = true
+							break
 						}
-
-						taintsToRemove = append(taintsToRemove, i)
-						// continue to remove any additional taints with the same key
 					}
+					if !toleratedPod {
+						continue
+					}
+					if !apiv1pod.IsPodReady(pod) {
+						allPodsReady = false
+						break
+					}
+					allPodsReady = true
 				}
-
-				if len(taintsToRemove) == 0 {
+				if !allPodsReady {
 					continue
 				}
 
 				// calculate the time here so potential slow node patching time doesn't get reflected in metrics
 				nodeTimeToReady := time.Since(time.Time(node.ObjectMeta.CreationTimestamp.Time)).Seconds()
 
-				// use reverse order to avoid indexing problems with multiple jsonpatch
-				// remove operations
-				sort.Sort(sort.Reverse(sort.IntSlice(taintsToRemove)))
-
-				patch := make([]JSONPatchOperation, len(taintsToRemove))
-				for i, t := range taintsToRemove {
-					log.Printf("removing taint %s from node %s", node.Spec.Taints[i].ToString(), node.ObjectMeta.Name)
-					patch[i] = JSONPatchOperation{
+				patch := []JSONPatchOperation{
+					{
 						Op:   JSONPatchOperationOpRemove,
-						Path: fmt.Sprintf("/spec/taints/%d", t),
-					}
+						Path: fmt.Sprintf("/spec/taints/%d", taintIndex),
+					},
 				}
 
 				bytes, err := json.Marshal(patch)
@@ -244,6 +239,7 @@ func main() {
 				if err != nil {
 					continue
 				}
+				log.Printf("untainted node %s", node.ObjectMeta.Name)
 
 				timeToStartup.WithLabelValues().Observe(nodeTimeToReady)
 				nodesUntainted.Inc()
