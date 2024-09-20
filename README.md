@@ -13,7 +13,8 @@ requiring each daemset to implement it directly.
 * [ ] breakdown main package into smaller, importable, unit tested packages
 * [ ] rework informers to use filtered watch calls
 * [ ] use a work queue to trigger reconciliation of specific nodes
-* [ ] provide public docker image and helm chart for installation
+* [x] provide public docker image
+* [ ] provide public helm chart for installation
 
 ## How to use
 
@@ -47,3 +48,9 @@ tolerations:
 
 4. Ensure daemonset pods are scheduled on nodes as expected and the taints are
    removed once the pods are ready.
+
+## Public image
+
+```
+docker pull vanstee/node-taint-manager:latest
+```
