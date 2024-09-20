@@ -183,7 +183,7 @@ func main() {
 				}
 
 				// only proceed if all the tolerated daemonset pods on the node are ready
-				allPodsReady := false
+				allPodsReady := true
 				for _, ipod := range pods {
 					pod, ok := ipod.(*apiv1.Pod)
 					if !ok {
@@ -207,7 +207,6 @@ func main() {
 						allPodsReady = false
 						break
 					}
-					allPodsReady = true
 				}
 				if !allPodsReady {
 					continue
