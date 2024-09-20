@@ -19,7 +19,6 @@ nodes:
     nodeRegistration:
       taints:
       - key: "node.vanstee.github.io/daemonset-not-ready"
-        value: "kube-system.test-1"
         effect: "NoSchedule"
 EOF
 
@@ -45,6 +44,33 @@ spec:
     spec:
       containers:
       - name: test-1
+        image: alpine
+        command: ["/bin/sleep", "infinity"]
+        readinessProbe:
+          exec:
+            command:
+            - "/bin/true"
+      tolerations:
+      - key: "node.vanstee.github.io/daemonset-not-ready"
+        operator: "Exists"
+EOF
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: test-2
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: test-2
+  template:
+    metadata:
+      labels:
+        name: test-2
+    spec:
+      containers:
+      - name: test-2
         image: alpine
         command: ["/bin/sleep", "infinity"]
         readinessProbe:

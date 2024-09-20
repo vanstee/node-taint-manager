@@ -24,12 +24,11 @@ kubectl apply -f manifest.yml
 kubectl -n node-taint-manager rollout status deployment node-taint-manager
 ```
 
-2. Configure taints for any required daemonsets.
+2. Configure taints to opt in nodes.
 
 ```
 taints:
 - key: "node.vanstee.github.io/daemonset-not-ready"
-  value: "calico-system.calico-node"
   effect: "NoSchedule"
 ```
 
@@ -43,12 +42,6 @@ tolerations:
 # ignore all daemonset-not-ready taints
 tolerations:
 - key: "node.vanstee.github.io/daemonset-not-ready"
-  operator: "Exists"
-
-# ignore specific daemonset-not-ready taint for this daemonset
-tolerations:
-- key: "node.vanstee.github.io/daemonset-not-ready"
-  value: "calico-system.calico-node"
   operator: "Exists"
 ```
 
