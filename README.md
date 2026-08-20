@@ -14,6 +14,7 @@ requiring each daemset to implement it directly.
 * [ ] rework informers to use filtered watch calls
 * [ ] use a work queue to trigger reconciliation of specific nodes
 * [x] provide public docker image
+* [x] optional leader election for running multiple replicas
 * [ ] provide public helm chart for installation
 
 ## How to use
@@ -48,6 +49,37 @@ tolerations:
 
 4. Ensure daemonset pods are scheduled on nodes as expected and the taints are
    removed once the pods are ready.
+
+## High availability
+
+The provided manifest runs two replicas with Kubernetes Lease-based leader
+election enabled:
+
+```
+--leader-elect
+```
+
+Every replica starts a warm informer cache and serves metrics. Only the pod
+holding the `node-taint-manager` Lease runs reconciliation and patches nodes.
+The Lease is created in the pod namespace. Optional overrides are available
+through `--leader-election-name` and `--leader-election-namespace`.
+
+Leader election is disabled by default in the binary for backward
+compatibility. When it is disabled, run exactly one replica.
+
+## Metrics
+
+Every pod serves Prometheus metrics on port `9090` at `/metrics`. The leader
+state is:
+
+```
+node_taint_manager_leader 0|1
+```
+
+A value of `1` marks the scraped target as the pod currently running
+reconciliation. The metrics collection pipeline should attach pod identity.
+Prometheus must scrape every pod endpoint rather than sending one scrape
+through the load-balanced Service.
 
 ## Public image
 

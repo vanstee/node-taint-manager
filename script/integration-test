@@ -2,12 +2,16 @@
 
 set -euxo pipefail
 
+cluster_name="node-taint-manager-integration"
+kind_bin="${KIND_BIN:-kind}"
+worker_node="${cluster_name}-worker"
+
 function cleanup() {
-	kind delete cluster
+	"${kind_bin}" delete cluster --name "${cluster_name}"
 }
 trap cleanup EXIT
 
-cat <<EOF | kind create cluster --config -
+cat <<EOF | "${kind_bin}" create cluster --name "${cluster_name}" --config -
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
@@ -23,8 +27,54 @@ nodes:
 EOF
 
 docker build -t node-taint-manager .
-kind load docker-image node-taint-manager
+"${kind_bin}" load docker-image node-taint-manager --name "${cluster_name}"
 kubectl apply -f manifest.yml
+kubectl -n node-taint-manager rollout status deploy/node-taint-manager
+
+timeout 30s bash <<'EOF'
+while true; do
+	leader="$(kubectl -n node-taint-manager get lease node-taint-manager -o jsonpath='{.spec.holderIdentity}' 2>/dev/null || true)"
+	if [[ -n "${leader}" ]]; then
+		metrics="$(kubectl get --raw "/api/v1/namespaces/node-taint-manager/pods/${leader}:9090/proxy/metrics" 2>/dev/null || true)"
+		if grep -q "^node_taint_manager_leader 1$" <<<"${metrics}"; then
+			break
+		fi
+	fi
+	sleep 1
+done
+EOF
+
+leader="$(kubectl -n node-taint-manager get lease node-taint-manager -o jsonpath='{.spec.holderIdentity}')"
+leader_count=0
+for pod in $(kubectl -n node-taint-manager get pods -l app=node-taint-manager -o jsonpath='{.items[*].metadata.name}'); do
+	metric_value="$(
+		kubectl get --raw "/api/v1/namespaces/node-taint-manager/pods/${pod}:9090/proxy/metrics" |
+			awk '$1 == "node_taint_manager_leader" { print $2 }'
+	)"
+	if [[ "${pod}" == "${leader}" ]]; then
+		test "${metric_value}" = "1"
+		leader_count=$((leader_count + 1))
+	else
+		test "${metric_value}" = "0"
+	fi
+done
+test "${leader_count}" -eq 1
+
+old_leader="${leader}"
+kubectl -n node-taint-manager delete pod "${old_leader}"
+export old_leader
+timeout 45s bash <<'EOF'
+while true; do
+	leader="$(kubectl -n node-taint-manager get lease node-taint-manager -o jsonpath='{.spec.holderIdentity}' 2>/dev/null || true)"
+	if [[ -n "${leader}" && "${leader}" != "${old_leader}" ]]; then
+		metrics="$(kubectl get --raw "/api/v1/namespaces/node-taint-manager/pods/${leader}:9090/proxy/metrics" 2>/dev/null || true)"
+		if grep -q "^node_taint_manager_leader 1$" <<<"${metrics}"; then
+			break
+		fi
+	fi
+	sleep 1
+done
+EOF
 kubectl -n node-taint-manager rollout status deploy/node-taint-manager
 
 cat <<EOF | kubectl apply -f -
@@ -83,11 +133,9 @@ spec:
 EOF
 
 timeout 30s bash <<EOF
-while ! kubectl get node kind-worker -o json | jq -e '.spec.taints == null'; do
+while ! kubectl get node "${worker_node}" -o json | jq -e '.spec.taints == null'; do
 	sleep 1
 done
 
-echo "!!!"
-echo "!!! SUCCESS: taint was removed for ready daemonset pod"
-echo "!!!"
+echo "!!! SUCCESS: leader failover completed and the new leader removed the taint"
 EOF
